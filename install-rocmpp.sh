@@ -28,6 +28,63 @@ warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; }
 die()  { err "$1"; exit 1; }
 
+# ── Visual feedback ─────────────────────────────────────────
+SPINNER_CHARS='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+
+spin() {
+    local pid=$1 msg=$2
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r  ${CYAN}%s${NC} %s" "${SPINNER_CHARS:i++%${#SPINNER_CHARS}:1}" "$msg"
+        sleep 0.1
+    done
+    printf "\r"
+}
+
+# Run command with spinner
+run_with_spinner() {
+    local msg="$1"; shift
+    local logfile="$1"; shift
+    "$@" > "$logfile" 2>&1 &
+    local pid=$!
+    spin $pid "$msg"
+    wait $pid
+    return $?
+}
+
+# Progress bar for known-length builds
+progress_bar() {
+    local current=$1 total=$2 width=40 label="${3:-}"
+    local pct=$((current * 100 / total))
+    local filled=$((current * width / total))
+    local empty=$((width - filled))
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+    printf "\r  ${CYAN}[%s]${NC} %3d%% %s" "$bar" "$pct" "$label"
+}
+
+# Monitor ninja build progress from log
+monitor_build() {
+    local logfile="$1" pid="$2" label="${3:-Building}"
+    local total=0 current=0
+    while kill -0 "$pid" 2>/dev/null; do
+        local line=$(tail -1 "$logfile" 2>/dev/null)
+        if [[ "$line" =~ \[([0-9]+)/([0-9]+)\] ]]; then
+            current=${BASH_REMATCH[1]}
+            total=${BASH_REMATCH[2]}
+            progress_bar "$current" "$total" "$label [$current/$total]"
+        else
+            printf "\r  ${CYAN}⠿${NC} %s..." "$label"
+        fi
+        sleep 0.5
+    done
+    if [[ $total -gt 0 ]]; then
+        progress_bar "$total" "$total" "$label [$total/$total]"
+    fi
+    echo ""
+}
+
 NPROC=$(nproc)
 HOME_DIR="$HOME"
 THEROCK_DIR="$HOME_DIR/therock"
@@ -72,12 +129,12 @@ ok "Kernel: $(uname -r)"
 # ── Step 2: System packages ─────────────────────────────────
 log "Step 2/8: Installing system packages..."
 
-sudo pacman -S --noconfirm --needed \
+run_with_spinner "Installing system packages..." "$LOG_DIR/pacman.log" \
+    sudo pacman -S --noconfirm --needed \
     base-devel cmake ninja git python python-pip \
     rocm-hip-sdk rocm-opencl-sdk \
     patchelf gcc-fortran numactl libdrm \
-    xxd curl unzip \
-    2>&1 | tail -5
+    xxd curl unzip
 
 # Python deps for Tensile kernel generation
 pip install --break-system-packages --quiet \
@@ -218,7 +275,10 @@ if [[ -n "$PYTHON_BIN" ]]; then
 fi
 
 ninja -C build -k0 math-libs/BLAS/rocBLAS math-libs/BLAS/hipBLASLt math-libs/BLAS/rocRoller \
-    -j"$NPROC" 2>&1 | tee "$LOG_DIR/therock-build.log" | tail -1
+    -j"$NPROC" > "$LOG_DIR/therock-build.log" 2>&1 &
+BUILD_PID=$!
+monitor_build "$LOG_DIR/therock-build.log" $BUILD_PID "TheRock BLAS"
+wait $BUILD_PID || true
 
 # Verify
 if [[ -f "build/math-libs/BLAS/rocBLAS/dist/lib/librocblas.so" ]]; then
@@ -259,7 +319,10 @@ cmake -B build -G Ninja \
     -DCMAKE_HIP_ARCHITECTURES=gfx1151 \
     2>&1 | tail -3
 
-cmake --build build --parallel "$NPROC" 2>&1 | tee "$LOG_DIR/engine-build.log" | tail -3
+cmake --build build --parallel "$NPROC" > "$LOG_DIR/engine-build.log" 2>&1 &
+BUILD_PID=$!
+monitor_build "$LOG_DIR/engine-build.log" $BUILD_PID "MLX Engine"
+wait $BUILD_PID || true
 
 if [[ -f "build/server" && -f "build/chat" ]]; then
     ok "lemon-mlx-engine built: server + chat"
