@@ -210,7 +210,9 @@ models auto-download from huggingface. no gguf. no conversion. no waiting.
 
 ```
 ┌──────────────────────────────────────────────┐
-│  user terminal · ftxui tui (chat + stats)     │
+│  user       ftxui tui   OR   imgui+sdl2 gui   │
+│             (terminal        (desktop, floating│
+│              / over SSH)      frosted tabs)    │
 ├──────────────────────────────────────────────┤
 │  agent-cpp runtime                            │
 │  ┌────────┬────────┬─────────┬──────┬───────┐ │
